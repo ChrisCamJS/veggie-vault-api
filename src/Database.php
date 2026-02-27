@@ -8,7 +8,7 @@ class Database {
         if (!self::$pdo) {
             // In reality, parse your .env file here
             $host = 'localhost'; 
-            $db   = 'marquee';
+            $db   = 'pantry_ce_show_live';
             $user = 'root';
             $pass = 'mysql';
             $charset = 'utf8mb4';

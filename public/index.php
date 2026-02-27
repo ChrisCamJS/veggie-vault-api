@@ -10,7 +10,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
-// Basic Autoloader (so you don't need 50 require_once calls)
 spl_autoload_register(function ($class) {
     $prefix = 'App\\';
     $base_dir = __DIR__ . '/../src/';
@@ -27,4 +26,16 @@ $router = require_once __DIR__ . '/../config/routes.php';
 
 // Dispatch
 $uri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+
+// Dynamically strip the base subdirectory path from the URI
+$scriptName = dirname($_SERVER['SCRIPT_NAME']); 
+if (strpos($uri, $scriptName) === 0) {
+    $uri = substr($uri, strlen($scriptName));
+}
+
+// Ensure the resulting URI always starts with a forward slash
+if (empty($uri) || $uri[0] !== '/') {
+    $uri = '/' . $uri;
+}
+
 $router->dispatch($uri, $_SERVER['REQUEST_METHOD']);
