@@ -42,9 +42,39 @@ class RecipeController {
         echo json_encode($formatted);
     }
 
-    /**
-     * Add a new entry
-     */
+    
+    public function getSingleRecipe() {
+        if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
+            http_response_code(400);
+            echo json_encode(["message" => "Invalid or Missing ID"]);
+            return;
+        }
+
+        $id = (int)$_GET['id'];
+        $db = database::connect();
+
+        // Prepare and execute the targeted query
+        $sql = "SELECT * FROM recipes WHERE id = :id";
+        $stmt = $db->prepare($sql);
+        $stmt->execute([':id' => $id]);
+        $recipe = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        // Handle the 404 if vault entry doesn't exist
+        if(!$recipe) {
+            http_response_code(404);
+            echo json_encode(['message' => "Recipe Not Found."]);
+            return;
+        }
+
+        // Decode the heavy JSON strings into PHP arrays for the Front-End
+        $recipe['ingredients'] = json_decode($recipe['ingredients'], true) ?: [];
+        $recipe['instructions'] = json_decode($recipe['instructions'], true) ?: [];
+        $recipe['nutrition_info'] = json_decode($recipe['nutrition_info'], true) ?: [];
+        $recipe['isOilFree'] = str_contains(strtolower($recipe['description']), 'oil-free');
+
+        echo json_encode($recipe);
+    }
+
     public function addRecipe() {
         $db = Database::connect();
         $data = json_decode(file_get_contents("php://input"), true);
