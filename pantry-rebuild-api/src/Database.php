@@ -1,15 +1,14 @@
 <?php
 namespace App;
 
-
 class Database {
     private static $pdo;
 
     public static function connect() {
         if (!self::$pdo) {
-            // could parse .env here as well
+            // In reality, parse your .env file here
             $host = 'localhost'; 
-            $db   = 'veggie_vault';
+            $db   = 'pantry_ce_show_live';
             $user = 'root';
             $pass = 'mysql';
             $charset = 'utf8mb4';
