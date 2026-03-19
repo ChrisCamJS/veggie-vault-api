@@ -73,13 +73,15 @@ class AuthController {
         session_destroy();
         echo json_encode(["success" => true, "message" => "Logged out successfully."]);
     }
-    /**
-     * Deduct a single generation token from the active user's account.
+/**
+     * Deduct generation tokens from the active user's account.
+     * Supports fractional token costs (e.g., 0.1 for Deep Dives).
      */
     public function deductToken() {
-        // You'll need to grab the user ID from your session or JWT here.
-        // Assuming you have it stored in $_SESSION['user_id'] or similar:
-        session_start();
+        if (session_status() === PHP_SESSION_NONE) {
+            session_start();
+        }
+        
         $userId = $_SESSION['user_id'] ?? null;
 
         if (!$userId) {
@@ -88,29 +90,48 @@ class AuthController {
             return;
         }
 
-        $db = Database::connect();
+        // --- NEW: Catch the dynamic cost from React! ---
+        $raw_input = file_get_contents("php://input");
+        $data = json_decode($raw_input, true);
+        
+        // Default to 1 token if no cost is explicitly sent
+        $cost = isset($data['cost']) ? (float)$data['cost'] : 1.0;
 
-        // First, let's make sure they aren't already skint!
-        $checkSql = "SELECT generation_tokens FROM users WHERE id = :id";
-        $checkStmt = $db->prepare($checkSql);
-        $checkStmt->execute([':id' => $userId]);
-        $currentTokens = $checkStmt->fetchColumn();
-
-        if ($currentTokens <= 0) {
-            http_response_code(403);
-            echo json_encode(["success" => false, "message" => "You are entirely out of tokens, love! Time to upgrade."]);
+        // Cheeky safety check to prevent negative costs (users paying themselves!)
+        if ($cost <= 0) {
+            http_response_code(400);
+            echo json_encode(["success" => false, "message" => "Invalid token amount."]);
             return;
         }
 
-        // Deduct one token
-        $updateSql = "UPDATE users SET generation_tokens = generation_tokens - 1 WHERE id = :id";
+        $db = Database::connect();
+
+        // First, check their current balance
+        $checkSql = "SELECT generation_tokens FROM users WHERE id = :id";
+        $checkStmt = $db->prepare($checkSql);
+        $checkStmt->execute([':id' => $userId]);
+        $currentTokens = (float)$checkStmt->fetchColumn();
+
+        // Make sure they have enough for THIS specific action
+        if ($currentTokens < $cost) {
+            http_response_code(403);
+            echo json_encode(["success" => false, "message" => "Oh dear! Your token stash is a bit too light for this. Time to top up!"]);
+            return;
+        }
+
+        // Deduct the exact cost
+        $updateSql = "UPDATE users SET generation_tokens = generation_tokens - :cost WHERE id = :id";
         $updateStmt = $db->prepare($updateSql);
-        $success = $updateStmt->execute([':id' => $userId]);
+        $success = $updateStmt->execute([':cost' => $cost, ':id' => $userId]);
 
         if ($success) {
-            // Send back the new balance so React can update the UI immediately
-            $newBalance = $currentTokens - 1;
-            echo json_encode(["success" => true, "tokensRemaining" => $newBalance, "message" => "Token deducted."]);
+            // Calculate the new balance to send back to React
+            $newBalance = $currentTokens - $cost;
+            
+            // Keep the PHP session data accurate too
+            $_SESSION['generation_tokens'] = $newBalance;
+            
+            echo json_encode(["success" => true, "tokensRemaining" => $newBalance, "message" => "Tokens deducted."]);
         } else {
             http_response_code(500);
             echo json_encode(["success" => false, "message" => "Failed to deduct token. Lucky you!"]);

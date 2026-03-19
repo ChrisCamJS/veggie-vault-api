@@ -21,31 +21,37 @@ class RecipeController {
      * Fetches the high-level list of all recipes for the Home Grid.
      * Includes core macros for the quick-view badges!
      */
-    public function getAllRecipes() {
-        try {
-            // We join the macros table so the Home page cards can show 
-            // the Protein/Calorie badges without needing a second API call.
-            $query = "
-                SELECT 
-                    r.id, r.title, r.description, r.image_url, r.yields, 
-                    r.prep_time_mins, r.cook_time_mins, r.is_wfpb, r.is_oil_free,
-                    m.calories, m.protein_g, m.carbs_g, m.fat_g
-                FROM recipes r
-                LEFT JOIN macros m ON r.id = m.recipe_id
-                ORDER BY r.created_at DESC
-            ";
+public function getAllRecipes() {
+        $db = Database::connect();
+        
+        // Added is_public and image_source to the SELECT
+        $sql = "SELECT id, title, description, image_url, yields, prep_time_mins, cook_time_mins, is_wfpb, is_oil_free, is_public, image_source, created_at 
+        FROM recipes 
+        ORDER BY id DESC";
+                
+        $stmt = $db->query($sql);
+        $recipes = $stmt->fetchAll();
 
-            $stmt = $this->db->prepare($query);
-            $stmt->execute();
-            $recipes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $formatted = array_map(function($r) {
+            return [
+                'id' => $r['id'],
+                'title' => $r['title'],
+                'description' => $r['description'],
+                'prepTime' => $r['prep_time_mins'],
+                'cookTime' => $r['cook_time_mins'],
+                'imageUrl' => $r['image_url'],
+                'yields' => $r['yields'],
+                'isWfpb' => (bool)$r['is_wfpb'], 
+                'isOilFree' => (bool)$r['is_oil_free'],
+                'isDraft' => !(bool)$r['is_public'], 
+                'isPublic' => (bool)$r['is_public'],
+                'imageSource' => $r['image_source'],
+                'createdAt' => $r['created_at'] 
+            ];
+        }, $recipes);
 
-            echo json_encode($recipes);
-        } catch (Exception $e) {
-            http_response_code(500);
-            echo json_encode(['error' => 'The vault is stuck: ' . $e->getMessage()]);
-        }
-    }
-    /**
+        echo json_encode($formatted);
+    }    /**
      * Fetch a single recipe with all its glorious relational data.
      * Perfect for populating RecipeDetails.jsx
      */
@@ -196,219 +202,224 @@ class RecipeController {
      * Saves a beautifully generated recipe straight from Emma's Engine.
      * Base64 image interceptor to reduce the file size
      */
-public function saveGeneratedRecipe() {
-    $json = file_get_contents("php://input");
-    $data = json_decode($json, true);
+    public function saveGeneratedRecipe() {
+        $db = Database::connect();
+        $data = json_decode(file_get_contents("php://input"), true);
 
-    if (!$data) {
-        http_response_code(400);
-        echo json_encode(['error' => 'No recipe data received.']);
-        return;
-    }
-
-    try {
-        $this->db->beginTransaction();
-
-        // --- EMMA'S IMAGE INTERCEPTOR ---
-        $imageUrl = $data['imageUrl'] ?? $data['image_url'] ?? null;
+        // 1. Unpack the data from React
+        $title = $data['title'] ?? 'Emma\'s AI Creation';
+        $description = $data['description'] ?? 'A glorious AI-generated WFPB meal.';
+        $ingredients = $data['ingredients'] ?? [];
+        $instructions = $data['instructions'] ?? [];
+        $prepTime = $data['prepTime'] ?? 0;
+        $cookTime = $data['cookTime'] ?? 0;
+        $yields = $data['yields'] ?? null;
+        $notes = $data['notes'] ?? '';
         
-        // If the image is a Base64 string, let's save it as a file instead of bloating the DB
-        if (strpos($imageUrl, 'data:image') === 0) {
-            $format = strpos($imageUrl, 'data:image/png') === 0 ? 'png' : 'jpg';
-            $image_parts = explode(";base64,", $imageUrl);
-            $image_base64 = base64_decode($image_parts[1]);
+        // Append Advanced Analysis to the description since there is no notes column
+        if (!empty($notes)) {
+            $description .= "\n\n### Emma's Deep Dive & Notes:\n" . $notes;
+        }
+
+        $isPublic = 0; 
+        $imageSource = 'none';
+        
+        $rawImageUrl = $data['imageUrl'] ?? ''; 
+        $finalImageUrl = '';
+
+        // 2. Handle the Image
+        if (!empty($rawImageUrl) && strpos($rawImageUrl, 'data:image') === 0) {
+            list($type, $imageData) = explode(';', $rawImageUrl);
+            list(, $imageData)      = explode(',', $imageData);
+            $decodedData = base64_decode($imageData);
             
-            // Create a unique filename based on the title
-            $safeTitle = preg_replace('/[^a-z0-9]+/', '-', strtolower($data['title']));
-            $fileName = $safeTitle . '-' . time() . '.' . $format;
+            $ext = 'jpg';
+            if (str_contains($type, 'png')) $ext = 'png';
+            if (str_contains($type, 'webp')) $ext = 'webp';
+
+            $filename = time() . '_ai_recipe_img.' . $ext;
+            $uploadDir = __DIR__ . '/../../public/images/';
             
-            $uploadDir = __DIR__ . '/../../public/uploads/recipes/';
             if (!is_dir($uploadDir)) {
-                mkdir($uploadDir, 0777, true);
+                mkdir($uploadDir, 0755, true);
             }
+
+            file_put_contents($uploadDir . $filename, $decodedData);
+            $finalImageUrl = '/images/' . $filename;
             
-            file_put_contents($uploadDir . $fileName, $image_base64);
-            
-            // This is what actually gets saved to the DB
-            $imageUrl = '/uploads/recipes/' . $fileName;
+            $imageSource = 'ai'; 
+            $isPublic = 1; // Unlock it for the General Public Feed!
+        } else {
+            $finalImageUrl = $rawImageUrl ?: '/images/default-veggie-vault-placeholder.jpg';
         }
 
-        // INSERT CORE RECIPE
-        $stmt = $this->db->prepare("
-            INSERT INTO recipes (title, description, image_url, yields, prep_time_mins, cook_time_mins, is_wfpb, is_oil_free, oil_rationale) 
-            VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?)
-        ");
-        $stmt->execute([
-            $data['title'],
-            $data['description'] ?? '',
-            $imageUrl,
-            $data['yields'] ?? 'Unknown',
-            intval(preg_replace('/[^0-9]/', '', $data['prepTime'] ?? $data['prep_time_mins'] ?? 0)),
-            intval(preg_replace('/[^0-9]/', '', $data['cookTime'] ?? $data['cook_time_mins'] ?? 0)),
-            $data['notes'] ?? 'Strictly oil-free WFPB.'
-        ]);
-        
-        $recipeId = $this->db->lastInsertId();
+        // 3. The SQL Transaction (All or Nothing!)
+        // 3. The SQL Transaction (All or Nothing!)
+        try {
+            $db->beginTransaction();
 
-            // INGREDIENTS
-            $ingList = $data['ingredients'] ?? [];
-            if (!empty($ingList)) {
-                $stmt = $this->db->prepare("INSERT INTO ingredients (recipe_id, quantity, unit, ingredient_name) VALUES (?, ?, ?, ?)");
-                foreach ($ingList as $ing) {
-                    if (strpos($ing, '##') === 0 || empty(trim($ing))) continue;
-                    $cleanIng = ltrim(trim($ing), '- *'); 
-                    $stmt->execute([$recipeId, 1, 'serving', $cleanIng]);
-                }
-            }
-
-            // INSTRUCTIONS
-            $instList = $data['instructions'] ?? [];
-            if (!empty($instList)) {
-                $stmt = $this->db->prepare("INSERT INTO instructions (recipe_id, step_number, instruction_text) VALUES (?, ?, ?)");
-                foreach ($instList as $index => $inst) {
-                    $stmt->execute([$recipeId, $index + 1, $inst]);
-                }
-            }
-
-            // NUTRITION (The Ultra-Robust Parser)
-            $nutrition = $data['nutritionInformation'] ?? $data['nutrition_info'] ?? $data['nutrition'] ?? null;
+            // STEP A: Create the Parent Recipe
+            $sqlRecipe = "INSERT INTO recipes (title, description, image_url, yields, prep_time_mins, cook_time_mins, is_wfpb, is_oil_free, is_public, image_source) 
+                          VALUES (:title, :description, :image_url, :yields, :prep_time_mins, :cook_time_mins, 1, 1, :is_public, :image_source)";
             
-            if ($nutrition) {
-                $getNum = function($val) {
-                    return floatval(preg_replace('/[^0-9.]/', '', $val));
-                };
+            $stmtRecipe = $db->prepare($sqlRecipe);
+            $stmtRecipe->execute([
+                ':title' => $title,
+                ':description' => $description, 
+                ':image_url' => $finalImageUrl,
+                ':yields' => $yields,
+                ':prep_time_mins' => $prepTime,
+                ':cook_time_mins' => $cookTime,
+                ':is_public' => $isPublic,
+                ':image_source' => $imageSource
+            ]);
 
-                // Insert Macros
-                $stmt = $this->db->prepare("INSERT INTO macros (recipe_id, calories, protein_g, carbs_g, fat_g, math_calculations) VALUES (?, ?, ?, ?, ?, ?)");
-                $stmt->execute([
-                    $recipeId,
-                    $getNum($nutrition['Calories'] ?? 0),
-                    $getNum($nutrition['Protein'] ?? 0),
-                    $getNum($nutrition['Carbohydrates'] ?? $nutrition['Carbs'] ?? 0),
-                    $getNum($nutrition['Fat'] ?? 0),
-                    "Core macros verified."
-                ]);
+            // Grab the ID of the recipe we just made
+            $recipeId = $db->lastInsertId();
 
-                // Insert Micros
-                $ignoreKeys = [
-                    'Calories', 'Protein', 'Carbohydrates', 'Carbs', 'Fat', 
-                    'Calculations', 'Total Recipe Sums', 'Per Serving', 'Notes'
-                ];
-                
-                $stmt = $this->db->prepare("INSERT INTO micros (recipe_id, nutrient_name, amount, unit, daily_value_percentage, math_calculations) VALUES (?, ?, ?, ?, ?, ?)");
-                
-                foreach ($nutrition as $key => $val) {
-                    // Skip if it's a macro or a giant text block
-                    if (in_array($key, $ignoreKeys) || is_array($val) || strlen($val) > 100) continue;
-
-                    // Extract the Daily Value %
-                    preg_match('/(\d+)/', $val, $matches);
-                    $dv = isset($matches[1]) ? intval($matches[1]) : 0;
-                    
-                    // Save only the clean nutrient data
-                    $stmt->execute([$recipeId, $key, $val, 'amt', $dv, "Emma Engine Analysis"]);
+            // STEP B: Insert Instructions
+            if (!empty($instructions)) {
+                $sqlInst = "INSERT INTO instructions (recipe_id, step_number, instruction_text) VALUES (:recipe_id, :step_number, :instruction_text)";
+                $stmtInst = $db->prepare($sqlInst);
+                foreach ($instructions as $index => $stepText) {
+                    $stmtInst->execute([
+                        ':recipe_id' => $recipeId,
+                        ':step_number' => $index + 1,
+                        ':instruction_text' => $stepText
+                    ]);
                 }
             }
-            $this->db->commit();
-        echo json_encode(['success' => true, 'recipe_id' => $recipeId, 'image_path' => $imageUrl]);
 
-        } catch (Exception $e) {
-            if ($this->db->inTransaction()) $this->db->rollBack();
+            // STEP C: Insert Ingredients
+            if (!empty($ingredients)) {
+                $sqlIng = "INSERT INTO ingredients (recipe_id, quantity, unit, ingredient_name) VALUES (:recipe_id, :quantity, :unit, :ingredient_name)";
+                $stmtIng = $db->prepare($sqlIng);
+                foreach ($ingredients as $ingText) {
+                    // Check if React sent an object or a plain string
+                    $ingName = is_array($ingText) ? ($ingText['ingredient_name'] ?? json_encode($ingText)) : $ingText;
+                    
+                    $stmtIng->execute([
+                        ':recipe_id' => $recipeId,
+                        ':quantity' => 0.00, 
+                        ':unit' => '',
+                        ':ingredient_name' => $ingName 
+                    ]);
+                }
+            }
+
+            // STEP D: Insert Macros
+            // Check if frontend sends it as 'macros' or 'nutritionInfo'
+            $macros = $data['macros'] ?? $data['nutritionInfo'] ?? [];
+            if (!empty($macros)) {
+                // If you added fiber_g, include it here. If not, remove it!
+                $sqlMacros = "INSERT INTO macros (recipe_id, calories, protein_g, carbs_g, fat_g, fiber_g, math_calculations)
+                              VALUES (:recipe_id, :calories, :protein_g, :carbs_g, :fat_g, :fiber_g, :math_calculations)";
+                $stmtMacros = $db->prepare($sqlMacros);
+                
+                // We use float casting and fallbacks to ensure MySQL doesn't throw a fit
+                $stmtMacros->execute([
+                    ':recipe_id' => $recipeId,
+                    ':calories' => (float)($macros['calories'] ?? 0),
+                    ':protein_g' => (float)($macros['protein'] ?? $macros['protein_g'] ?? 0),
+                    ':carbs_g' => (float)($macros['carbs'] ?? $macros['carbs_g'] ?? 0),
+                    ':fat_g' => (float)($macros['fat'] ?? $macros['fat_g'] ?? 0),
+                    ':fiber_g' => (float)($macros['fiber'] ?? $macros['fiber_g'] ?? 0), // Assumes DB column exists
+                    ':math_calculations' => '' // We banished the math!
+                ]);
+            }
+
+            // STEP E: Insert Micros (If they clicked Deep Dive before saving)
+            $micros = $data['micros'] ?? [];
+            if (!empty($micros) && is_array($micros)) {
+                $sqlMicros = "INSERT INTO micros (recipe_id, nutrient_name, amount, unit, daily_value_percentage, math_calculations)
+                              VALUES (:recipe_id, :nutrient_name, :amount, :unit, :daily_value_percentage, :math_calculations)";
+                $stmtMicros = $db->prepare($sqlMicros);
+                foreach ($micros as $micro) {
+                    $stmtMicros->execute([
+                        ':recipe_id' => $recipeId,
+                        ':nutrient_name' => $micro['name'] ?? $micro['nutrient_name'] ?? 'Unknown',
+                        ':amount' => (float)($micro['amount'] ?? 0),
+                        ':unit' => $micro['unit'] ?? 'mg',
+                        ':daily_value_percentage' => (float)($micro['dv'] ?? $micro['daily_value_percentage'] ?? 0),
+                        ':math_calculations' => ''
+                    ]);
+                }
+            }
+
+            // Everything worked! Commit to the database.
+            $db->commit();
+
+            $msg = $isPublic ? "Brilliant! Full recipe vaulted and published to the feed." : "Smashing! Text draft locked in your private vault.";
+            echo json_encode(["success" => true, "message" => $msg]);
+
+        } catch (\Exception $e) {
+            // Something broke. Cancel the entire transaction.
+            $db->rollBack();
             http_response_code(500);
-            echo json_encode(['error' => 'The Vault rejected the deposit: ' . $e->getMessage()]);
+            echo json_encode(["success" => false, "message" => "Database error: " . $e->getMessage()]);
         }
     }
-    /**
-     * Update an existing recipe. 
+    /*
+     * Update an existing recipe.
      * "Wipe and Replace" strategy for relational data.
      */
     public function updateRecipe() {
-        // Grab the JSON payload from the frontend
-        $data = json_decode(file_get_contents("php://input"), true);
-        $recipeId = $data['id'] ?? null;
-
-        if (!$recipeId) {
+        if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
             http_response_code(400);
-            echo json_encode(['error' => 'Recipe ID is required for an update, darling.']);
+            echo json_encode(["message" => "Invalid or Missing ID"]);
             return;
         }
 
-        try {
-            $this->db->beginTransaction();
+        $id = (int)$_GET['id'];
+        $db = Database::connect();
+        $data = json_decode(file_get_contents("php://input"), true);
 
-            // Update Core Recipe
-            $stmt = $this->db->prepare("
-                UPDATE recipes 
-                SET title = ?, description = ?, image_url = ?, yields = ?, prep_time_mins = ?, cook_time_mins = ?, 
-                    is_wfpb = ?, is_oil_free = ?, oil_rationale = ?
-                WHERE id = ?
-            ");
-            $stmt->execute([
-                $data['title'], 
-                $data['description'], 
-                $data['image_url'] ?? null,
-                $data['yields'], 
-                $data['prep_time_mins'], 
-                $data['cook_time_mins'], 
-                $data['is_wfpb'] ?? 1, 
-                $data['is_oil_free'] ?? 1, 
-                $data['oil_rationale'] ?? null,
-                $recipeId
-            ]);
+        // A massive UPDATE statement to overwrite the old data AND our new columns
+        $sql = "UPDATE recipes SET 
+                title = :title, 
+                description = :description, 
+                ingredients = :ingredients, 
+                instructions = :instructions, 
+                prep_time = :prep_time, 
+                cook_time = :cook_time, 
+                nutrition_info = :nutrition_info, 
+                notes = :notes,
+                yields = :yields,
+                image_url = :image_url,
+                is_public = :is_public,
+                image_source = :image_source
+                WHERE id = :id";
+        
+        $stmt = $db->prepare($sql);
+        $success = $stmt->execute([
+            ':title' => $data['title'] ?? '',
+            ':description' => $data['description'] ?? '',
+            ':ingredients' => json_encode($data['ingredients'] ?? []),
+            ':instructions' => json_encode($data['instructions'] ?? []),
+            ':prep_time' => $data['prepTime'] ?? 0,
+            ':cook_time' => $data['cookTime'] ?? 0,
+            ':nutrition_info' => json_encode($data['nutritionInfo'] ?? []),
+            ':notes' => $data['notes'] ?? '',
+            ':yields' => $data['yields'] ?? '',
+            ':image_url' => $data['imageUrl'] ?? '',
+            ':is_public' => $data['isPublic'] ?? 0,
+            ':image_source' => $data['imageSource'] ?? 'none',
+            ':id' => $id
+        ]);
 
-            // Wipe the old relational data clean
-            $this->db->prepare("DELETE FROM ingredients WHERE recipe_id = ?")->execute([$recipeId]);
-            $this->db->prepare("DELETE FROM instructions WHERE recipe_id = ?")->execute([$recipeId]);
-            $this->db->prepare("DELETE FROM macros WHERE recipe_id = ?")->execute([$recipeId]);
-            $this->db->prepare("DELETE FROM micros WHERE recipe_id = ?")->execute([$recipeId]);
-
-            // Insert the fresh ingredients
-            if (!empty($data['ingredients'])) {
-                $stmt = $this->db->prepare("INSERT INTO ingredients (recipe_id, quantity, unit, ingredient_name, notes) VALUES (?, ?, ?, ?, ?)");
-                foreach ($data['ingredients'] as $ing) {
-                    $stmt->execute([$recipeId, $ing['quantity'], $ing['unit'], $ing['ingredient_name'], $ing['notes'] ?? null]);
-                }
-            }
-
-            // Insert the instructions
-            if (!empty($data['instructions'])) {
-                $stmt = $this->db->prepare("INSERT INTO instructions (recipe_id, step_number, instruction_text) VALUES (?, ?, ?)");
-                foreach ($data['instructions'] as $index => $inst) {
-                    $stmt->execute([$recipeId, $index + 1, $inst['instruction_text']]);
-                }
-            }
-
-            //  Insert the macros
-            if (!empty($data['macros'])) {
-                $stmt = $this->db->prepare("INSERT INTO macros (recipe_id, calories, protein_g, carbs_g, fat_g, math_calculations) VALUES (?, ?, ?, ?, ?, ?)");
-                $m = $data['macros'];
-                $stmt->execute([$recipeId, $m['calories'], $m['protein_g'], $m['carbs_g'], $m['fat_g'], $m['math_calculations']]);
-            }
-
-            // Insert the 15 micros
-            if (!empty($data['micros'])) {
-                $stmt = $this->db->prepare("INSERT INTO micros (recipe_id, nutrient_name, amount, unit, daily_value_percentage, math_calculations) VALUES (?, ?, ?, ?, ?, ?)");
-                foreach ($data['micros'] as $micro) {
-                    $stmt->execute([$recipeId, $micro['nutrient_name'], $micro['amount'], $micro['unit'], $micro['daily_value_percentage'], $micro['math_calculations']]);
-                }
-            }
-
-            $this->db->commit();
-            echo json_encode(['success' => true, 'message' => 'Recipe updated brilliantly.']);
-
-        } catch (Exception $e) {
-            $this->db->rollBack();
+        if ($success) {
+            echo json_encode(["success" => true, "message" => "Recipe successfully updated!"]);
+        } else {
             http_response_code(500);
-            echo json_encode(['success' => false, 'error' => 'Update failed: ' . $e->getMessage()]);
+            echo json_encode(["success" => false, "message" => "Failed to update the recipe."]);
         }
     }
-
     public function deleteRecipe() {
         $id = $_GET['id'] ?? null;
         
         if (!$id) {
             http_response_code(400);
-            echo json_encode(['error' => 'Missing ID. I cannot delete a ghost.']);
+            echo json_encode(['error' => 'Missing ID.']);
             return;
         }
 
@@ -416,7 +427,7 @@ public function saveGeneratedRecipe() {
             $stmt = $this->db->prepare("DELETE FROM recipes WHERE id = ?");
             $stmt->execute([$id]);
             
-            echo json_encode(['success' => true, 'message' => 'Recipe completely obliterated.']);
+            echo json_encode(['success' => true, 'message' => 'Recipe Deleted.']);
         } catch (Exception $e) {
             http_response_code(500);
             echo json_encode(['error' => 'Failed to delete recipe: ' . $e->getMessage()]);
