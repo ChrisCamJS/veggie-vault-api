@@ -258,14 +258,15 @@ public function getAllRecipes() {
         try {
             $db->beginTransaction();
 
-            // STEP A: Create the Parent Recipe
-            $sqlRecipe = "INSERT INTO recipes (title, description, image_url, yields, prep_time_mins, cook_time_mins, is_wfpb, is_oil_free, is_public, image_source) 
-                          VALUES (:title, :description, :image_url, :yields, :prep_time_mins, :cook_time_mins, 1, 1, :is_public, :image_source)";
+            // STEP A: Create the Parent Recipe (Now with the notes column!)
+            $sqlRecipe = "INSERT INTO recipes (title, description, notes, image_url, yields, prep_time_mins, cook_time_mins, is_wfpb, is_oil_free, is_public, image_source) 
+                          VALUES (:title, :description, :notes, :image_url, :yields, :prep_time_mins, :cook_time_mins, 1, 1, :is_public, :image_source)";
             
             $stmtRecipe = $db->prepare($sqlRecipe);
             $stmtRecipe->execute([
                 ':title' => $title,
                 ':description' => $description, 
+                ':notes' => $notes, 
                 ':image_url' => $finalImageUrl,
                 ':yields' => $yields,
                 ':prep_time_mins' => $prepTime,
@@ -308,23 +309,28 @@ public function getAllRecipes() {
             }
 
             // STEP D: Insert Macros
-            // Check if frontend sends it as 'macros' or 'nutritionInfo'
-            $macros = $data['macros'] ?? $data['nutritionInfo'] ?? [];
-            if (!empty($macros)) {
-                // If you added fiber_g, include it here. If not, remove it!
-                $sqlMacros = "INSERT INTO macros (recipe_id, calories, protein_g, carbs_g, fat_g, fiber_g, math_calculations)
+            $calories = $data['calories'] ?? 0;
+            $protein_g = $data['protein_g'] ?? 0;
+            $carbs_g = $data['carbs_g'] ?? 0;
+            $fat_g = $data['fat_g'] ?? 0;
+            $fiber_g = $data['fiber_g'] ?? 0;
+
+            // Only insert if we actually captured some nutritional data
+            if ($calories > 0 || $protein_g > 0) {
+                // Note: I removed fiber_g from the SQL since we didn't extract it in React, 
+                // but if your database strictly requires it, you can add it back as a 0 default.
+                $sqlMacros = "INSERT INTO macros (recipe_id, calories, protein_g, carbs_g, fat_g, fiber_f, math_calculations)
                               VALUES (:recipe_id, :calories, :protein_g, :carbs_g, :fat_g, :fiber_g, :math_calculations)";
                 $stmtMacros = $db->prepare($sqlMacros);
                 
-                // We use float casting and fallbacks to ensure MySQL doesn't throw a fit
                 $stmtMacros->execute([
                     ':recipe_id' => $recipeId,
-                    ':calories' => (float)($macros['calories'] ?? 0),
-                    ':protein_g' => (float)($macros['protein'] ?? $macros['protein_g'] ?? 0),
-                    ':carbs_g' => (float)($macros['carbs'] ?? $macros['carbs_g'] ?? 0),
-                    ':fat_g' => (float)($macros['fat'] ?? $macros['fat_g'] ?? 0),
-                    ':fiber_g' => (float)($macros['fiber'] ?? $macros['fiber_g'] ?? 0), // Assumes DB column exists
-                    ':math_calculations' => '' // We banished the math!
+                    ':calories' => (float)$calories,
+                    ':protein_g' => (float)$protein_g,
+                    ':carbs_g' => (float)$carbs_g,
+                    ':fat_g' => (float)$fat_g,
+                    ':fiber_g' => (float)$fiber_g,
+                    ':math_calculations' => ''
                 ]);
             }
 
