@@ -215,11 +215,6 @@ public function getAllRecipes() {
         $cookTime = $data['cookTime'] ?? 0;
         $yields = $data['yields'] ?? null;
         $notes = $data['notes'] ?? '';
-        
-        // Append Advanced Analysis to the description since there is no notes column
-        if (!empty($notes)) {
-            $description .= "\n\n### Emma's Deep Dive & Notes:\n" . $notes;
-        }
 
         $isPublic = 0; 
         $imageSource = 'none';
@@ -317,12 +312,10 @@ public function getAllRecipes() {
 
             // Only insert if we actually captured some nutritional data
             if ($calories > 0 || $protein_g > 0) {
-                // Note: I removed fiber_g from the SQL since we didn't extract it in React, 
-                // but if your database strictly requires it, you can add it back as a 0 default.
-                $sqlMacros = "INSERT INTO macros (recipe_id, calories, protein_g, carbs_g, fat_g, fiber_f, math_calculations)
-                              VALUES (:recipe_id, :calories, :protein_g, :carbs_g, :fat_g, :fiber_g, :math_calculations)";
+                $sqlMacros = "INSERT INTO macros (recipe_id, calories, protein_g, carbs_g, fat_g, fiber_g, math_calculations)
+                        VALUES (:recipe_id, :calories, :protein_g, :carbs_g, :fat_g, :fiber_g, :math_calculations)";
                 $stmtMacros = $db->prepare($sqlMacros);
-                
+
                 $stmtMacros->execute([
                     ':recipe_id' => $recipeId,
                     ':calories' => (float)$calories,
